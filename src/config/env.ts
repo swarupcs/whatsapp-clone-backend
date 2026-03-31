@@ -15,20 +15,44 @@ function optionalEnv(key: string, fallback: string): string {
   return process.env[key] ?? fallback;
 }
 
+const nodeEnv = optionalEnv('NODE_ENV', 'development');
+const isProd = nodeEnv === 'production';
+
+// BUG FIX 2: In production, JWT secrets MUST be provided via environment variables.
+// Using fallback dev secrets in production is a critical security vulnerability —
+// anyone who knows the default secret can forge valid JWTs for any user.
+// We use requireEnv in production and emit a loud warning in development.
+function getJwtSecret(key: string, devFallback: string): string {
+  if (isProd) {
+    return requireEnv(key);
+  }
+  const value = process.env[key];
+  if (!value) {
+    console.warn(
+      `[Security] WARNING: ${key} is not set. Using insecure dev fallback. ` +
+        `Never deploy to production without setting this variable.`,
+    );
+    return devFallback;
+  }
+  return value;
+}
+
 export const env = {
   port: parseInt(optionalEnv('PORT', '5000'), 10),
-  nodeEnv: optionalEnv('NODE_ENV', 'development'),
-  isDev: optionalEnv('NODE_ENV', 'development') === 'development',
-  isProd: optionalEnv('NODE_ENV', 'development') === 'production',
+  nodeEnv,
+  isDev: nodeEnv === 'development',
+  isProd,
 
   mongodb: {
-    uri: optionalEnv('MONGODB_URI', 'mongodb://localhost:27017/whatsapp_clone'),
+    uri: isProd
+      ? requireEnv('MONGODB_URI')
+      : optionalEnv('MONGODB_URI', 'mongodb://localhost:27017/whatsapp_clone'),
   },
 
   jwt: {
-    secret: optionalEnv('JWT_SECRET', 'dev-secret-change-in-prod'),
+    secret: getJwtSecret('JWT_SECRET', 'dev-secret-change-in-prod'),
     expiresIn: optionalEnv('JWT_EXPIRES_IN', '7d'),
-    refreshSecret: optionalEnv('JWT_REFRESH_SECRET', 'dev-refresh-secret'),
+    refreshSecret: getJwtSecret('JWT_REFRESH_SECRET', 'dev-refresh-secret'),
     refreshExpiresIn: optionalEnv('JWT_REFRESH_EXPIRES_IN', '30d'),
   },
 

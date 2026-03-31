@@ -14,57 +14,43 @@ import { messageService } from '../services/message.service.js';
 import { Conversation } from '../models/conversation.model.js';
 import type { SocketTypingPayload, SocketCallPayload } from '../types/index.js';
 
-// ─── Event name constants ─────────────────────────────────────────────────────
-
 export const SOCKET_EVENTS = {
   CONNECT: 'connect',
   DISCONNECT: 'disconnect',
   ERROR: 'error',
-
   JOIN: 'join',
   JOINED: 'joined',
-
   SEND_MESSAGE: 'send_message',
   NEW_MESSAGE: 'new_message',
   EDIT_MESSAGE: 'edit_message',
   MESSAGE_EDITED: 'message_edited',
   DELETE_MESSAGE: 'delete_message',
   MESSAGE_DELETED: 'message_deleted',
-
   TOGGLE_REACTION: 'toggle_reaction',
   REACTION_UPDATED: 'reaction_updated',
-
   MARK_SEEN: 'mark_seen',
   MESSAGE_SEEN: 'message_seen',
-
   TYPING_START: 'typing',
   TYPING_STOP: 'stop_typing',
-
   USER_ONLINE: 'user_online',
   USER_OFFLINE: 'user_offline',
   ONLINE_USERS: 'online_users',
-
   INITIATE_CALL: 'initiate_call',
   INCOMING_CALL: 'incoming_call',
   CALL_ACCEPTED: 'call_accepted',
   CALL_REJECTED: 'call_rejected',
   CALL_ENDED: 'call_ended',
   CALL_SIGNAL: 'call_signal',
-
   PIN_MESSAGE: 'pin_message',
   MESSAGE_PINNED: 'message_pinned',
   UNPIN_MESSAGE: 'unpin_message',
   MESSAGE_UNPINNED: 'message_unpinned',
 } as const;
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
 interface AuthenticatedSocket extends Socket {
   userId: string;
   userEmail: string;
 }
-
-// ─── Initialise Socket.IO ─────────────────────────────────────────────────────
 
 export function initSocket(httpServer: HttpServer): SocketIOServer {
   const io = new SocketIOServer(httpServer, {
@@ -77,10 +63,9 @@ export function initSocket(httpServer: HttpServer): SocketIOServer {
     pingInterval: 25000,
   });
 
-  // ── Auth middleware ──────────────────────────────────────────────────────
   io.use((socket, next) => {
     const token =
-      socket.handshake.auth?.['token'] as string | undefined ??
+      (socket.handshake.auth?.['token'] as string | undefined) ??
       (socket.handshake.headers.authorization?.startsWith('Bearer ')
         ? socket.handshake.headers.authorization.slice(7)
         : undefined);
@@ -102,14 +87,15 @@ export function initSocket(httpServer: HttpServer): SocketIOServer {
     const userId = authedSocket.userId;
 
     console.log(`[Socket] Connected: ${userId} (${socket.id})`);
-
-    // Register in runtime store
     addSocket(socket.id, userId);
 
-    // Join conversation rooms + broadcast online status
-    handleUserOnline(io, socket, userId);
-
-    // ── Event handlers ──────────────────────────────────────────────────
+    // BUG FIX 8: handleUserOnline is async — wrap in .catch() so a failure
+    // (e.g. DB error looking up conversations) results in an error log instead
+    // of a silent unhandled promise rejection. The connection stays alive but
+    // we log the failure so it can be investigated.
+    handleUserOnline(io, socket, userId).catch((err) => {
+      console.error(`[Socket] handleUserOnline failed for ${userId}:`, err);
+    });
 
     socket.on(SOCKET_EVENTS.TYPING_START, (data: SocketTypingPayload) => {
       handleTyping(socket, data, true);
@@ -153,7 +139,11 @@ export function initSocket(httpServer: HttpServer): SocketIOServer {
 
     socket.on(
       SOCKET_EVENTS.CALL_ACCEPTED,
-      (data: { callerId: string; conversationId: string; signal?: unknown }) => {
+      (data: {
+        callerId: string;
+        conversationId: string;
+        signal?: unknown;
+      }) => {
         handleCallAccepted(io, userId, data);
       },
     );
@@ -172,16 +162,21 @@ export function initSocket(httpServer: HttpServer): SocketIOServer {
       },
     );
 
-    socket.on(SOCKET_EVENTS.CALL_SIGNAL, (data: { toUserId: string; signal: unknown }) => {
-      handleCallSignal(io, userId, data);
-    });
-
-    // ── Disconnect ───────────────────────────────────────────────────────
+    socket.on(
+      SOCKET_EVENTS.CALL_SIGNAL,
+      (data: { toUserId: string; signal: unknown }) => {
+        handleCallSignal(io, userId, data);
+      },
+    );
 
     socket.on('disconnect', () => {
       console.log(`[Socket] Disconnected: ${userId} (${socket.id})`);
       const uid = removeSocket(socket.id);
-      if (uid) handleUserOffline(io, uid);
+      if (uid) {
+        handleUserOffline(io, uid).catch((err) => {
+          console.error(`[Socket] handleUserOffline failed for ${uid}:`, err);
+        });
+      }
     });
   });
 
@@ -190,28 +185,42 @@ export function initSocket(httpServer: HttpServer): SocketIOServer {
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
-async function handleUserOnline(io: SocketIOServer, socket: Socket, userId: string): Promise<void> {
+async function handleUserOnline(
+  io: SocketIOServer,
+  socket: Socket,
+  userId: string,
+): Promise<void> {
   await userService.updateStatus(userId, 'online');
 
-  // Join all conversation rooms this user belongs to
   const convs = await Conversation.find({ members: userId }, '_id');
-  convs.forEach((c) => socket.join(c._id.toString()));
+  convs.forEach((c) => {
+    const roomId = c._id.toString();
+    socket.join(roomId);
+  });
 
   socket.broadcast.emit(SOCKET_EVENTS.USER_ONLINE, { userId });
   socket.emit(SOCKET_EVENTS.ONLINE_USERS, { userIds: getOnlineUserIds() });
 }
 
-async function handleUserOffline(io: SocketIOServer, userId: string): Promise<void> {
-  // Only go offline if no remaining sockets for this user
+async function handleUserOffline(
+  io: SocketIOServer,
+  userId: string,
+): Promise<void> {
   if (!isUserOnline(userId)) {
     await userService.updateStatus(userId, 'offline');
     io.emit(SOCKET_EVENTS.USER_OFFLINE, { userId });
   }
 }
 
-function handleTyping(socket: Socket, data: SocketTypingPayload, isTyping: boolean): void {
+function handleTyping(
+  socket: Socket,
+  data: SocketTypingPayload,
+  isTyping: boolean,
+): void {
   if (!data.conversationId) return;
-  const event = isTyping ? SOCKET_EVENTS.TYPING_START : SOCKET_EVENTS.TYPING_STOP;
+  const event = isTyping
+    ? SOCKET_EVENTS.TYPING_START
+    : SOCKET_EVENTS.TYPING_STOP;
   socket.to(data.conversationId).emit(event, {
     conversationId: data.conversationId,
     userId: data.userId,
@@ -227,7 +236,11 @@ async function handleMarkSeen(
   const { conversationId, messageId } = data;
   if (!conversationId || !messageId) return;
 
-  const updated = await messageService.markMessageSeen(conversationId, messageId, userId);
+  const updated = await messageService.markMessageSeen(
+    conversationId,
+    messageId,
+    userId,
+  );
   if (!updated) return;
 
   io.to(conversationId).emit(SOCKET_EVENTS.MESSAGE_SEEN, {
@@ -246,7 +259,12 @@ async function handleToggleReaction(
   const { conversationId, messageId, emoji } = data;
   if (!conversationId || !messageId || !emoji) return;
 
-  const updated = await messageService.toggleReaction(conversationId, messageId, userId, emoji);
+  const updated = await messageService.toggleReaction(
+    conversationId,
+    messageId,
+    userId,
+    emoji,
+  );
   if (typeof updated === 'string') return;
 
   io.to(conversationId).emit(SOCKET_EVENTS.REACTION_UPDATED, {
@@ -271,7 +289,9 @@ async function handlePin(
 
   if (typeof result === 'string') return;
 
-  const event = pin ? SOCKET_EVENTS.MESSAGE_PINNED : SOCKET_EVENTS.MESSAGE_UNPINNED;
+  const event = pin
+    ? SOCKET_EVENTS.MESSAGE_PINNED
+    : SOCKET_EVENTS.MESSAGE_UNPINNED;
   io.to(conversationId).emit(event, { conversationId, message: result });
 }
 
@@ -348,13 +368,33 @@ function handleCallSignal(
   });
 }
 
-// ─── Export: emit new message to a room ──────────────────────────────────────
-
 export function emitNewMessage(
   io: SocketIOServer,
   conversationId: string,
   message: unknown,
   conversation: unknown,
 ): void {
-  io.to(conversationId).emit(SOCKET_EVENTS.NEW_MESSAGE, { message, conversation });
+  io.to(conversationId).emit(SOCKET_EVENTS.NEW_MESSAGE, {
+    message,
+    conversation,
+  });
+}
+
+export function emitMessageEdited(
+  io: SocketIOServer,
+  conversationId: string,
+  message: unknown,
+): void {
+  io.to(conversationId).emit(SOCKET_EVENTS.MESSAGE_EDITED, { message });
+}
+
+export function emitMessageDeleted(
+  io: SocketIOServer,
+  conversationId: string,
+  messageId: string,
+): void {
+  io.to(conversationId).emit(SOCKET_EVENTS.MESSAGE_DELETED, {
+    messageId,
+    conversationId,
+  });
 }

@@ -17,8 +17,6 @@ import type {
   PublicUser,
 } from '../types/index.js';
 
-// ─── Result types ─────────────────────────────────────────────────────────────
-
 export interface LoginResult {
   user: PublicUser;
   tokens: AuthTokens;
@@ -29,25 +27,25 @@ export interface RegisterResult {
   tokens: AuthTokens;
 }
 
-// ─── Auth Service ─────────────────────────────────────────────────────────────
-
 export const authService = {
-  /**
-   * Authenticate a user with email + password.
-   */
   async login(data: LoginRequest): Promise<LoginResult | null> {
     const user = await User.findOne({ email: data.email.toLowerCase().trim() });
     if (!user) return null;
 
-    const passwordMatch = await comparePassword(data.password, user.passwordHash);
+    const passwordMatch = await comparePassword(
+      data.password,
+      user.passwordHash,
+    );
     if (!passwordMatch) return null;
 
-    // Mark user online
     user.status = 'online';
     user.updatedAt = nowDate();
     await user.save();
 
-    const tokens = generateTokenPair({ userId: user._id.toString(), email: user.email });
+    const tokens = generateTokenPair({
+      userId: user._id.toString(),
+      email: user.email,
+    });
 
     await RefreshToken.create({
       token: tokens.refreshToken,
@@ -58,11 +56,12 @@ export const authService = {
     return { user: docToPublicUser(user), tokens };
   },
 
-  /**
-   * Register a new user account.
-   */
-  async register(data: RegisterRequest): Promise<RegisterResult | 'email_taken'> {
-    const exists = await User.findOne({ email: data.email.toLowerCase().trim() });
+  async register(
+    data: RegisterRequest,
+  ): Promise<RegisterResult | 'email_taken'> {
+    const exists = await User.findOne({
+      email: data.email.toLowerCase().trim(),
+    });
     if (exists) return 'email_taken';
 
     const passwordHash = await hashPassword(data.password);
@@ -76,7 +75,10 @@ export const authService = {
       about: 'Hey there! I am using WhatsUp',
     });
 
-    const tokens = generateTokenPair({ userId: newUser._id.toString(), email: newUser.email });
+    const tokens = generateTokenPair({
+      userId: newUser._id.toString(),
+      email: newUser.email,
+    });
 
     await RefreshToken.create({
       token: tokens.refreshToken,
@@ -88,23 +90,31 @@ export const authService = {
   },
 
   /**
-   * Rotate refresh tokens.
+   * BUG FIX 3: Atomic refresh token rotation using findOneAndDelete.
+   *
+   * Old code did findOne → verify → deleteOne in separate steps.
+   * Two concurrent refresh requests with the same token would BOTH pass the
+   * findOne check before either deleteOne ran, resulting in two new token pairs
+   * being issued for the same refresh token (classic token replay attack window).
+   *
+   * findOneAndDelete is atomic at the DB level — only ONE request will find and
+   * delete the document; the concurrent one gets null and returns early.
    */
   async refreshTokens(refreshToken: string): Promise<AuthTokens | null> {
-    const stored = await RefreshToken.findOne({ token: refreshToken });
-    if (!stored) return null;
+    // Atomically find AND delete in one operation
+    const stored = await RefreshToken.findOneAndDelete({ token: refreshToken });
+    if (!stored) return null; // Already used or doesn't exist
 
     try {
       const payload = verifyRefreshToken(refreshToken);
       const user = await User.findById(payload.userId);
-      if (!user) {
-        await RefreshToken.deleteOne({ token: refreshToken });
-        return null;
-      }
+      if (!user) return null; // User deleted — don't re-create the token
 
-      // Rotate: delete old, issue new
-      await RefreshToken.deleteOne({ token: refreshToken });
-      const tokens = generateTokenPair({ userId: user._id.toString(), email: user.email });
+      // Issue new token pair
+      const tokens = generateTokenPair({
+        userId: user._id.toString(),
+        email: user.email,
+      });
 
       await RefreshToken.create({
         token: tokens.refreshToken,
@@ -114,28 +124,21 @@ export const authService = {
 
       return tokens;
     } catch {
-      await RefreshToken.deleteOne({ token: refreshToken });
+      // JWT verification failed (tampered/expired token) — stored doc already deleted above
       return null;
     }
   },
 
-  /**
-   * Logout — invalidate token and set offline.
-   */
   async logout(userId: string, refreshToken?: string): Promise<void> {
     if (refreshToken) {
       await RefreshToken.deleteOne({ token: refreshToken });
     }
-
     await User.findByIdAndUpdate(userId, {
       status: 'offline',
       updatedAt: nowDate(),
     });
   },
 
-  /**
-   * Get currently authenticated user.
-   */
   async getMe(userId: string): Promise<PublicUser | null> {
     const user = await User.findById(userId);
     if (!user) return null;
