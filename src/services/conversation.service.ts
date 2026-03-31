@@ -3,7 +3,7 @@ import { Conversation } from '../models/conversation.model.js';
 import { Message } from '../models/message.model.js';
 import { User } from '../models/user.model.js';
 import { docToPublicUser, nowDate } from '../helpers/index.js';
-import { isUserOnline } from '../config/runtimeStore.js';
+import { isUserOnline, getSocketsForUser } from '../config/runtimeStore.js';
 import type {
   Conversation as ConversationType,
   PublicUser,
@@ -21,7 +21,17 @@ function docToMessage(doc: InstanceType<typeof Message>): MessageType {
     conversationId: String(obj['conversationId']),
     senderId: String(obj['senderId']),
     message: String(obj['message'] ?? ''),
-    files: (obj['files'] as { attachmentId: string; name: string; type: string; url: string; size: number }[] | undefined)?.map((f) => ({
+    files: (
+      obj['files'] as
+        | {
+            attachmentId: string;
+            name: string;
+            type: string;
+            url: string;
+            size: number;
+          }[]
+        | undefined
+    )?.map((f) => ({
       id: f.attachmentId,
       name: f.name,
       type: f.type,
@@ -30,7 +40,11 @@ function docToMessage(doc: InstanceType<typeof Message>): MessageType {
     })),
     reactions: ((obj['reactions'] as unknown[]) ?? []).map((r) => {
       const reaction = r as Record<string, unknown>;
-      return { emoji: String(reaction['emoji']), userId: String(reaction['userId']), createdAt: reaction['createdAt'] as Date };
+      return {
+        emoji: String(reaction['emoji']),
+        userId: String(reaction['userId']),
+        createdAt: reaction['createdAt'] as Date,
+      };
     }),
     replyTo: obj['replyTo'] as MessageType['replyTo'],
     seenBy: ((obj['seenBy'] as unknown[]) ?? []).map(String),
@@ -57,6 +71,21 @@ async function buildConversationDto(
     status: isUserOnline(u._id.toString()) ? 'online' : u.status,
   }));
 
+  // BUG FIX 1: For DM conversations, show the OTHER person's name/picture
+  // relative to the requesting user, not the stored name (which is from creator's POV)
+  let displayName = conv.name;
+  let displayPicture = conv.picture;
+
+  if (!conv.isGroup) {
+    const otherUser = memberDocs.find(
+      (u) => u._id.toString() !== requestingUserId,
+    );
+    if (otherUser) {
+      displayName = otherUser.name;
+      displayPicture = otherUser.picture;
+    }
+  }
+
   // Unread count: messages not sent by me, not deleted, not seen by me
   const unreadCount = await Message.countDocuments({
     conversationId: conv._id,
@@ -74,8 +103,8 @@ async function buildConversationDto(
 
   return {
     id: conv._id.toString(),
-    name: conv.name,
-    picture: conv.picture,
+    name: displayName,
+    picture: displayPicture,
     isGroup: conv.isGroup,
     users,
     adminId: conv.adminId?.toString(),
@@ -93,7 +122,9 @@ export const conversationService = {
    * Get all conversations for a user, sorted by latest activity.
    */
   async getConversationsForUser(userId: string): Promise<ConversationType[]> {
-    const convs = await Conversation.find({ members: userId }).sort({ updatedAt: -1 });
+    const convs = await Conversation.find({ members: userId }).sort({
+      updatedAt: -1,
+    });
     return Promise.all(convs.map((c) => buildConversationDto(c, userId)));
   },
 
@@ -138,6 +169,9 @@ export const conversationService = {
     const requester = await User.findById(requesterId);
     if (!requester) return 'user_not_found';
 
+    // BUG FIX 1: Store the target user's name/picture so that when the target
+    // views this conversation, buildConversationDto will swap it to the requester's
+    // name/picture for them (since we now derive name from the other member).
     const newConv = await Conversation.create({
       name: targetUser.name,
       picture: targetUser.picture,
@@ -155,8 +189,13 @@ export const conversationService = {
     creatorId: string,
     data: CreateGroupRequest,
   ): Promise<ConversationType | 'invalid_members'> {
-    const memberIds = [creatorId, ...data.userIds.filter((id) => id !== creatorId)];
+    // Deduplicate and ensure creator is always included
+    const uniqueUserIds = [
+      ...new Set(data.userIds.filter((id) => id !== creatorId)),
+    ];
+    const memberIds = [creatorId, ...uniqueUserIds];
 
+    // Group needs creator + at least 2 others
     if (memberIds.length < 3) return 'invalid_members';
 
     // Verify all users exist
@@ -178,18 +217,29 @@ export const conversationService = {
 
   /**
    * Add a member to a group (admin only).
+   * Returns the updated conversation DTO AND the new member's socket IDs
+   * so the caller (controller) can join them to the socket room.
    */
   async addGroupMember(
     conversationId: string,
     requesterId: string,
     targetUserId: string,
-  ): Promise<ConversationType | 'not_found' | 'not_group' | 'not_admin' | 'already_member' | 'user_not_found'> {
+  ): Promise<
+    | ConversationType
+    | 'not_found'
+    | 'not_group'
+    | 'not_admin'
+    | 'already_member'
+    | 'user_not_found'
+  > {
     const conv = await Conversation.findById(conversationId);
     if (!conv) return 'not_found';
     if (!conv.isGroup) return 'not_group';
     if (conv.adminId?.toString() !== requesterId) return 'not_admin';
 
-    const alreadyMember = conv.members.some((m) => m.toString() === targetUserId);
+    const alreadyMember = conv.members.some(
+      (m) => m.toString() === targetUserId,
+    );
     if (alreadyMember) return 'already_member';
 
     const targetUser = await User.findById(targetUserId);
@@ -204,12 +254,15 @@ export const conversationService = {
 
   /**
    * Remove a member from a group (admin only, or self-leave).
+   * Returns the updated conversation DTO.
    */
   async removeGroupMember(
     conversationId: string,
     requesterId: string,
     targetUserId: string,
-  ): Promise<ConversationType | 'not_found' | 'not_group' | 'not_admin' | 'not_member'> {
+  ): Promise<
+    ConversationType | 'not_found' | 'not_group' | 'not_admin' | 'not_member'
+  > {
     const conv = await Conversation.findById(conversationId);
     if (!conv) return 'not_found';
     if (!conv.isGroup) return 'not_group';
