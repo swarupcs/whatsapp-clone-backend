@@ -1,3 +1,18 @@
+/**
+ * app.ts — Express application factory.
+ *
+ * Order of middleware matters:
+ *   1. Security (helmet, CORS)
+ *   2. Request ID attachment (for log correlation)
+ *   3. Request logger
+ *   4. Body parsers
+ *   5. Rate limiters
+ *   6. Static files
+ *   7. API routes
+ *   8. 404 handler          ← catches unmatched routes
+ *   9. Global error handler ← MUST be last, MUST have 4 params (err, req, res, next)
+ */
+
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -9,7 +24,9 @@ import {
   requestLogger,
   notFoundHandler,
   globalErrorHandler,
-} from './middleware/error.js';
+  attachRequestId,
+  requireJsonBody,
+} from './middleware/error.middleware.js';
 
 export function createApp(): express.Application {
   const app = express();
@@ -23,16 +40,23 @@ export function createApp(): express.Application {
       origin: env.cors.clientUrl,
       credentials: true,
       methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
     }),
   );
+
+  // ── Request correlation ID ────────────────────────────────────────────────
+  app.use(attachRequestId);
 
   // ── Request logger ────────────────────────────────────────────────────────
   app.use(requestLogger);
 
   // ── Body parsers ──────────────────────────────────────────────────────────
+  // These throw SyntaxError on malformed JSON — caught by globalErrorHandler
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+  // ── Content-Type guard (after body parsers, before routes) ────────────────
+  app.use('/api', requireJsonBody);
 
   // ── Rate limiting ─────────────────────────────────────────────────────────
   const limiter = rateLimit({
@@ -40,15 +64,30 @@ export function createApp(): express.Application {
     max: env.rateLimit.maxRequests,
     standardHeaders: true,
     legacyHeaders: false,
-    message: { success: false, error: 'Too many requests, please try again later.' },
+    // Return a proper structured error instead of a plain string
+    handler: (_req, res) => {
+      res.status(429).json({
+        success: false,
+        statusCode: 429,
+        code: 'TOO_MANY_REQUESTS',
+        message: 'Too many requests, please try again later.',
+      });
+    },
     skip: (req) => req.path === '/api/health',
   });
   app.use('/api', limiter);
 
   const authLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
+    windowMs: 15 * 60 * 1000, // 15 minutes
     max: 20,
-    message: { success: false, error: 'Too many auth attempts, please try again later.' },
+    handler: (_req, res) => {
+      res.status(429).json({
+        success: false,
+        statusCode: 429,
+        code: 'TOO_MANY_AUTH_ATTEMPTS',
+        message: 'Too many authentication attempts, please try again later.',
+      });
+    },
   });
   app.use('/api/auth', authLimiter);
 
@@ -61,8 +100,13 @@ export function createApp(): express.Application {
   // ── API routes ────────────────────────────────────────────────────────────
   app.use('/api', apiRouter);
 
-  // ── 404 + error handlers ─────────────────────────────────────────────────
+  // ── 404 handler ───────────────────────────────────────────────────────────
+  // Must come AFTER all routes
   app.use(notFoundHandler);
+
+  // ── Global error handler ──────────────────────────────────────────────────
+  // MUST be last and MUST have exactly 4 parameters so Express recognizes it
+  // as an error handler
   app.use(globalErrorHandler);
 
   return app;
