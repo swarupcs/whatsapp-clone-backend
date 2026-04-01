@@ -27,8 +27,14 @@ export const messageController = {
   /** GET /api/conversations/:conversationId/messages */
   list: asyncHandler(async (req: Request, res: Response) => {
     const { page, limit } = parseBody(paginationQuerySchema, req.query);
-    const result = await messageService.getMessages(req.params['conversationId']!, page, limit);
-    sendOk(res, result.data, undefined, {
+    const result = await messageService.getMessages(
+      req.params['conversationId']!,
+      page,
+      limit,
+    );
+
+    // ✅ Send the complete paginated response
+    sendOk(res, result, undefined, {
       page: result.page,
       limit: result.limit,
       total: result.total,
@@ -42,14 +48,18 @@ export const messageController = {
     const q = String(req.query['q'] ?? '').trim();
     if (!q) throw new BadRequestError('Search query is required');
 
-    const results = await messageService.searchMessages(req.params['conversationId']!, q);
+    const results = await messageService.searchMessages(
+      req.params['conversationId']!,
+      q,
+    );
     sendOk(res, results);
   }),
 
   /** GET /api/messages/search?q=... */
   globalSearch: asyncHandler(async (req: Request, res: Response) => {
     const q = String(req.query['q'] ?? '').trim();
-    if (q.length < 2) throw new BadRequestError('Search query must be at least 2 characters');
+    if (q.length < 2)
+      throw new BadRequestError('Search query must be at least 2 characters');
 
     const results = await messageService.globalSearch(req.userId!, q);
     sendOk(res, results);
@@ -57,11 +67,14 @@ export const messageController = {
 
   /** POST /api/conversations/:conversationId/messages */
   send: asyncHandler(async (req: Request, res: Response) => {
-    const uploadedFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
+    const uploadedFiles =
+      (req.files as Express.Multer.File[] | undefined) ?? [];
     const rawMessage = String(req.body?.['message'] ?? '').trim();
 
     if (!rawMessage && uploadedFiles.length === 0) {
-      throw new BadRequestError('Message text or at least one file is required');
+      throw new BadRequestError(
+        'Message text or at least one file is required',
+      );
     }
 
     let replyTo: Parameters<typeof messageService.sendMessage>[4];
@@ -77,7 +90,9 @@ export const messageController = {
     }
 
     const baseUrl = `${req.protocol}://${req.get('host')}`;
-    const fileAttachments = uploadedFiles.map((f) => multerFileToAttachment(f, baseUrl));
+    const fileAttachments = uploadedFiles.map((f) =>
+      multerFileToAttachment(f, baseUrl),
+    );
 
     const result = await messageService.sendMessage(
       req.params['conversationId']!,
@@ -87,13 +102,18 @@ export const messageController = {
       replyTo,
     );
 
-    if (result === 'conversation_not_found') throw new NotFoundError('Conversation');
-    if (result === 'not_member') throw new ForbiddenError('You are not a member of this conversation');
+    if (result === 'conversation_not_found')
+      throw new NotFoundError('Conversation');
+    if (result === 'not_member')
+      throw new ForbiddenError('You are not a member of this conversation');
 
     // Broadcast via Socket.IO
     const io = req.app.locals['io'] as SocketIOServer | undefined;
     if (io) {
-      const conv = await conversationService.getConversationById(result.conversationId, req.userId!);
+      const conv = await conversationService.getConversationById(
+        result.conversationId,
+        req.userId!,
+      );
       if (conv) emitNewMessage(io, result.conversationId, result, conv);
     }
 
@@ -112,8 +132,10 @@ export const messageController = {
     );
 
     if (result === 'not_found') throw new NotFoundError('Message');
-    if (result === 'not_owner') throw new ForbiddenError('You can only edit your own messages');
-    if (result === 'deleted') throw new BadRequestError('Cannot edit a deleted message');
+    if (result === 'not_owner')
+      throw new ForbiddenError('You can only edit your own messages');
+    if (result === 'deleted')
+      throw new BadRequestError('Cannot edit a deleted message');
 
     sendOk(res, result, 'Message edited');
   }),
@@ -127,7 +149,8 @@ export const messageController = {
     );
 
     if (result === 'not_found') throw new NotFoundError('Message');
-    if (result === 'not_owner') throw new ForbiddenError('You can only delete your own messages');
+    if (result === 'not_owner')
+      throw new ForbiddenError('You can only delete your own messages');
 
     sendOk(res, result, 'Message deleted');
   }),
@@ -144,7 +167,8 @@ export const messageController = {
     );
 
     if (result === 'not_found') throw new NotFoundError('Message');
-    if (result === 'deleted') throw new BadRequestError('Cannot react to a deleted message');
+    if (result === 'deleted')
+      throw new BadRequestError('Cannot react to a deleted message');
 
     sendOk(res, result);
   }),
@@ -158,7 +182,8 @@ export const messageController = {
     );
 
     if (result === 'not_found') throw new NotFoundError('Message');
-    if (result === 'deleted') throw new BadRequestError('Cannot pin a deleted message');
+    if (result === 'deleted')
+      throw new BadRequestError('Cannot pin a deleted message');
 
     sendOk(res, result, 'Message pinned');
   }),
@@ -171,14 +196,17 @@ export const messageController = {
     );
 
     if (result === 'not_found') throw new NotFoundError('Message');
-    if (result === 'deleted') throw new BadRequestError('Cannot unpin a deleted message');
+    if (result === 'deleted')
+      throw new BadRequestError('Cannot unpin a deleted message');
 
     sendOk(res, result, 'Message unpinned');
   }),
 
   /** GET /api/conversations/:conversationId/messages/pinned */
   listPinned: asyncHandler(async (req: Request, res: Response) => {
-    const pinned = await messageService.getPinnedMessages(req.params['conversationId']!);
+    const pinned = await messageService.getPinnedMessages(
+      req.params['conversationId']!,
+    );
     sendOk(res, pinned);
   }),
 
@@ -194,8 +222,12 @@ export const messageController = {
     );
 
     if (result === 'not_found') throw new NotFoundError('Message');
-    if (result === 'target_not_found') throw new NotFoundError('Target conversation');
-    if (result === 'not_member') throw new ForbiddenError('You are not a member of the target conversation');
+    if (result === 'target_not_found')
+      throw new NotFoundError('Target conversation');
+    if (result === 'not_member')
+      throw new ForbiddenError(
+        'You are not a member of the target conversation',
+      );
 
     sendCreated(res, result, 'Message forwarded');
   }),
