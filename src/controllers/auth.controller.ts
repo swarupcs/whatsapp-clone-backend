@@ -1,64 +1,78 @@
+/**
+ * auth.controller.ts — Refactored with asyncHandler + AppErrors.
+ *
+ * BEFORE:  every method had its own try/catch.
+ * AFTER:   no try/catch anywhere. asyncHandler catches every thrown error
+ *          (AppError, ZodError, Mongoose error, etc.) and forwards it to the
+ *          global error handler which produces a consistent response.
+ *
+ * Controller responsibilities:
+ *   1. Parse + validate the request            → throws ValidationError on failure
+ *   2. Call the service                        → returns data OR a discriminant string
+ *   3. Map the service result to an HTTP response (success or throw an AppError)
+ */
+
 import type { Request, Response } from 'express';
 import { authService } from '../services/auth.service.js';
 import {
-  sendSuccess,
-  sendCreated,
-  sendError,
-  sendUnauthorized,
-  sendConflict,
-} from '../helpers/index.js';
+  UnauthorizedError,
+  ConflictError,
+  NotFoundError,
+} from '../errors/AppError.js';
+import { sendOk, sendCreated } from '../utils/response.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
 import {
+  parseBody,
   loginSchema,
   registerSchema,
   refreshTokenSchema,
-  safeParseBody,
 } from '../helpers/validation.js';
 
 export const authController = {
   /** POST /api/auth/login */
-  async login(req: Request, res: Response): Promise<void> {
-    const parsed = safeParseBody(loginSchema, req.body);
-    if (!parsed.success) { sendError(res, parsed.error); return; }
+  login: asyncHandler(async (req: Request, res: Response) => {
+    const data = parseBody(loginSchema, req.body);
 
-    const result = await authService.login(parsed.data);
-    if (!result) { sendUnauthorized(res, 'Invalid email or password'); return; }
+    const result = await authService.login(data);
+    if (!result) throw new UnauthorizedError('Invalid email or password');
 
-    sendSuccess(res, result, 'Login successful');
-  },
+    sendOk(res, result, 'Login successful');
+  }),
 
   /** POST /api/auth/register */
-  async register(req: Request, res: Response): Promise<void> {
-    const parsed = safeParseBody(registerSchema, req.body);
-    if (!parsed.success) { sendError(res, parsed.error); return; }
+  register: asyncHandler(async (req: Request, res: Response) => {
+    const data = parseBody(registerSchema, req.body);
 
-    const result = await authService.register(parsed.data);
-    if (result === 'email_taken') { sendConflict(res, 'An account with this email already exists'); return; }
+    const result = await authService.register(data);
+    if (result === 'email_taken') {
+      throw new ConflictError('An account with this email already exists');
+    }
 
     sendCreated(res, result, 'Account created successfully');
-  },
+  }),
 
   /** POST /api/auth/refresh */
-  async refresh(req: Request, res: Response): Promise<void> {
-    const parsed = safeParseBody(refreshTokenSchema, req.body);
-    if (!parsed.success) { sendError(res, parsed.error); return; }
+  refresh: asyncHandler(async (req: Request, res: Response) => {
+    const { refreshToken } = parseBody(refreshTokenSchema, req.body);
 
-    const tokens = await authService.refreshTokens(parsed.data.refreshToken);
-    if (!tokens) { sendUnauthorized(res, 'Invalid or expired refresh token'); return; }
+    const tokens = await authService.refreshTokens(refreshToken);
+    if (!tokens) throw new UnauthorizedError('Invalid or expired refresh token');
 
-    sendSuccess(res, tokens, 'Tokens refreshed');
-  },
+    sendOk(res, tokens, 'Tokens refreshed');
+  }),
 
   /** POST /api/auth/logout */
-  async logout(req: Request, res: Response): Promise<void> {
+  logout: asyncHandler(async (req: Request, res: Response) => {
     const { refreshToken } = req.body as { refreshToken?: string };
     await authService.logout(req.userId!, refreshToken);
-    sendSuccess(res, null, 'Logged out successfully');
-  },
+    sendOk(res, null, 'Logged out successfully');
+  }),
 
   /** GET /api/auth/me */
-  async me(req: Request, res: Response): Promise<void> {
+  me: asyncHandler(async (req: Request, res: Response) => {
     const user = await authService.getMe(req.userId!);
-    if (!user) { sendUnauthorized(res, 'User not found'); return; }
-    sendSuccess(res, user);
-  },
+    if (!user) throw new NotFoundError('User');
+
+    sendOk(res, user);
+  }),
 };

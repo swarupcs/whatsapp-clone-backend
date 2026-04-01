@@ -1,60 +1,67 @@
+/**
+ * message.controller.ts — Refactored with asyncHandler + AppErrors.
+ */
+
 import type { Request, Response } from 'express';
+import type { Server as SocketIOServer } from 'socket.io';
 import { messageService } from '../services/message.service.js';
+import { conversationService } from '../services/conversation.service.js';
+import { emitNewMessage } from '../socket/index.js';
 import {
-  sendSuccess,
-  sendCreated,
-  sendError,
-  sendNotFound,
-  sendForbidden,
-} from '../helpers/index.js';
+  NotFoundError,
+  ForbiddenError,
+  BadRequestError,
+} from '../errors/AppError.js';
+import { sendOk, sendCreated } from '../utils/response.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
 import {
+  parseBody,
   editMessageSchema,
   addReactionSchema,
   forwardMessageSchema,
   paginationQuerySchema,
-  safeParseBody,
 } from '../helpers/validation.js';
 import { multerFileToAttachment } from '../helpers/upload.js';
-import type { Server as SocketIOServer } from 'socket.io';
-import { conversationService } from '../services/conversation.service.js';
-import { emitNewMessage } from '../socket/index.js';
 
 export const messageController = {
   /** GET /api/conversations/:conversationId/messages */
-  async list(req: Request, res: Response): Promise<void> {
-    const parsed = safeParseBody(paginationQuerySchema, req.query);
-    const { page, limit } = parsed.success ? parsed.data : { page: 1, limit: 30 };
-
+  list: asyncHandler(async (req: Request, res: Response) => {
+    const { page, limit } = parseBody(paginationQuerySchema, req.query);
     const result = await messageService.getMessages(req.params['conversationId']!, page, limit);
-    sendSuccess(res, result);
-  },
+    sendOk(res, result.data, undefined, {
+      page: result.page,
+      limit: result.limit,
+      total: result.total,
+      hasMore: result.hasMore,
+      nextCursor: result.nextCursor,
+    });
+  }),
 
   /** GET /api/conversations/:conversationId/messages/search?q=... */
-  async search(req: Request, res: Response): Promise<void> {
+  search: asyncHandler(async (req: Request, res: Response) => {
     const q = String(req.query['q'] ?? '').trim();
-    if (!q) { sendError(res, 'Search query is required'); return; }
+    if (!q) throw new BadRequestError('Search query is required');
 
     const results = await messageService.searchMessages(req.params['conversationId']!, q);
-    sendSuccess(res, results);
-  },
+    sendOk(res, results);
+  }),
 
   /** GET /api/messages/search?q=... */
-  async globalSearch(req: Request, res: Response): Promise<void> {
+  globalSearch: asyncHandler(async (req: Request, res: Response) => {
     const q = String(req.query['q'] ?? '').trim();
-    if (q.length < 2) { sendError(res, 'Search query must be at least 2 characters'); return; }
+    if (q.length < 2) throw new BadRequestError('Search query must be at least 2 characters');
 
     const results = await messageService.globalSearch(req.userId!, q);
-    sendSuccess(res, results);
-  },
+    sendOk(res, results);
+  }),
 
   /** POST /api/conversations/:conversationId/messages */
-  async send(req: Request, res: Response): Promise<void> {
+  send: asyncHandler(async (req: Request, res: Response) => {
     const uploadedFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
     const rawMessage = String(req.body?.['message'] ?? '').trim();
 
     if (!rawMessage && uploadedFiles.length === 0) {
-      sendError(res, 'Message text or at least one file is required');
-      return;
+      throw new BadRequestError('Message text or at least one file is required');
     }
 
     let replyTo: Parameters<typeof messageService.sendMessage>[4];
@@ -65,8 +72,7 @@ export const messageController = {
             ? JSON.parse(req.body['replyTo'])
             : req.body['replyTo'];
       } catch {
-        sendError(res, 'Invalid replyTo format');
-        return;
+        throw new BadRequestError('Invalid replyTo format');
       }
     }
 
@@ -81,133 +87,128 @@ export const messageController = {
       replyTo,
     );
 
-    if (result === 'conversation_not_found') { sendNotFound(res, 'Conversation'); return; }
-    if (result === 'not_member') { sendForbidden(res, 'You are not a member of this conversation'); return; }
+    if (result === 'conversation_not_found') throw new NotFoundError('Conversation');
+    if (result === 'not_member') throw new ForbiddenError('You are not a member of this conversation');
 
-    // Broadcast via Socket.IO before sending HTTP response
+    // Broadcast via Socket.IO
     const io = req.app.locals['io'] as SocketIOServer | undefined;
     if (io) {
       const conv = await conversationService.getConversationById(result.conversationId, req.userId!);
-      if (conv) {
-        emitNewMessage(io, result.conversationId, result, conv);
-      }
+      if (conv) emitNewMessage(io, result.conversationId, result, conv);
     }
 
     sendCreated(res, result, 'Message sent');
-  },
+  }),
 
   /** PATCH /api/conversations/:conversationId/messages/:messageId */
-  async edit(req: Request, res: Response): Promise<void> {
-    const parsed = safeParseBody(editMessageSchema, req.body);
-    if (!parsed.success) { sendError(res, parsed.error); return; }
+  edit: asyncHandler(async (req: Request, res: Response) => {
+    const { message } = parseBody(editMessageSchema, req.body);
 
     const result = await messageService.editMessage(
       req.params['conversationId']!,
       req.params['messageId']!,
       req.userId!,
-      parsed.data.message,
+      message,
     );
 
-    if (result === 'not_found') { sendNotFound(res, 'Message'); return; }
-    if (result === 'not_owner') { sendForbidden(res, 'You can only edit your own messages'); return; }
-    if (result === 'deleted') { sendError(res, 'Cannot edit a deleted message'); return; }
+    if (result === 'not_found') throw new NotFoundError('Message');
+    if (result === 'not_owner') throw new ForbiddenError('You can only edit your own messages');
+    if (result === 'deleted') throw new BadRequestError('Cannot edit a deleted message');
 
-    sendSuccess(res, result, 'Message edited');
-  },
+    sendOk(res, result, 'Message edited');
+  }),
 
   /** DELETE /api/conversations/:conversationId/messages/:messageId */
-  async delete(req: Request, res: Response): Promise<void> {
+  delete: asyncHandler(async (req: Request, res: Response) => {
     const result = await messageService.deleteMessage(
       req.params['conversationId']!,
       req.params['messageId']!,
       req.userId!,
     );
 
-    if (result === 'not_found') { sendNotFound(res, 'Message'); return; }
-    if (result === 'not_owner') { sendForbidden(res, 'You can only delete your own messages'); return; }
+    if (result === 'not_found') throw new NotFoundError('Message');
+    if (result === 'not_owner') throw new ForbiddenError('You can only delete your own messages');
 
-    sendSuccess(res, result, 'Message deleted');
-  },
+    sendOk(res, result, 'Message deleted');
+  }),
 
   /** POST /api/conversations/:conversationId/messages/:messageId/reactions */
-  async toggleReaction(req: Request, res: Response): Promise<void> {
-    const parsed = safeParseBody(addReactionSchema, req.body);
-    if (!parsed.success) { sendError(res, parsed.error); return; }
+  toggleReaction: asyncHandler(async (req: Request, res: Response) => {
+    const { emoji } = parseBody(addReactionSchema, req.body);
 
     const result = await messageService.toggleReaction(
       req.params['conversationId']!,
       req.params['messageId']!,
       req.userId!,
-      parsed.data.emoji,
+      emoji,
     );
 
-    if (result === 'not_found') { sendNotFound(res, 'Message'); return; }
-    if (result === 'deleted') { sendError(res, 'Cannot react to a deleted message'); return; }
+    if (result === 'not_found') throw new NotFoundError('Message');
+    if (result === 'deleted') throw new BadRequestError('Cannot react to a deleted message');
 
-    sendSuccess(res, result);
-  },
+    sendOk(res, result);
+  }),
 
   /** POST /api/conversations/:conversationId/messages/:messageId/pin */
-  async pin(req: Request, res: Response): Promise<void> {
+  pin: asyncHandler(async (req: Request, res: Response) => {
     const result = await messageService.pinMessage(
       req.params['conversationId']!,
       req.params['messageId']!,
       req.userId!,
     );
 
-    if (result === 'not_found') { sendNotFound(res, 'Message'); return; }
-    if (result === 'deleted') { sendError(res, 'Cannot pin a deleted message'); return; }
+    if (result === 'not_found') throw new NotFoundError('Message');
+    if (result === 'deleted') throw new BadRequestError('Cannot pin a deleted message');
 
-    sendSuccess(res, result, 'Message pinned');
-  },
+    sendOk(res, result, 'Message pinned');
+  }),
 
   /** DELETE /api/conversations/:conversationId/messages/:messageId/pin */
-  async unpin(req: Request, res: Response): Promise<void> {
+  unpin: asyncHandler(async (req: Request, res: Response) => {
     const result = await messageService.unpinMessage(
       req.params['conversationId']!,
       req.params['messageId']!,
     );
 
-    if (result === 'not_found') { sendNotFound(res, 'Message'); return; }
-    if (result === 'deleted') { sendError(res, 'Cannot unpin a deleted message'); return; }
+    if (result === 'not_found') throw new NotFoundError('Message');
+    if (result === 'deleted') throw new BadRequestError('Cannot unpin a deleted message');
 
-    sendSuccess(res, result, 'Message unpinned');
-  },
+    sendOk(res, result, 'Message unpinned');
+  }),
 
   /** GET /api/conversations/:conversationId/messages/pinned */
-  async listPinned(req: Request, res: Response): Promise<void> {
+  listPinned: asyncHandler(async (req: Request, res: Response) => {
     const pinned = await messageService.getPinnedMessages(req.params['conversationId']!);
-    sendSuccess(res, pinned);
-  },
+    sendOk(res, pinned);
+  }),
 
   /** POST /api/conversations/:conversationId/messages/:messageId/forward */
-  async forward(req: Request, res: Response): Promise<void> {
-    const parsed = safeParseBody(forwardMessageSchema, req.body);
-    if (!parsed.success) { sendError(res, parsed.error); return; }
+  forward: asyncHandler(async (req: Request, res: Response) => {
+    const { toConversationId } = parseBody(forwardMessageSchema, req.body);
 
     const result = await messageService.forwardMessage(
       req.params['messageId']!,
       req.params['conversationId']!,
-      parsed.data.toConversationId,
+      toConversationId,
       req.userId!,
     );
 
-    if (result === 'not_found') { sendNotFound(res, 'Message'); return; }
-    if (result === 'target_not_found') { sendNotFound(res, 'Target conversation'); return; }
-    if (result === 'not_member') { sendForbidden(res, 'You are not a member of the target conversation'); return; }
+    if (result === 'not_found') throw new NotFoundError('Message');
+    if (result === 'target_not_found') throw new NotFoundError('Target conversation');
+    if (result === 'not_member') throw new ForbiddenError('You are not a member of the target conversation');
 
     sendCreated(res, result, 'Message forwarded');
-  },
+  }),
 
   /** POST /api/conversations/:conversationId/messages/:messageId/seen */
-  async markSeen(req: Request, res: Response): Promise<void> {
+  markSeen: asyncHandler(async (req: Request, res: Response) => {
     const updated = await messageService.markMessageSeen(
       req.params['conversationId']!,
       req.params['messageId']!,
       req.userId!,
     );
 
-    if (!updated) { sendNotFound(res, 'Message'); return; }
-    sendSuccess(res, updated);
-  },
+    if (!updated) throw new NotFoundError('Message');
+    sendOk(res, updated);
+  }),
 };
