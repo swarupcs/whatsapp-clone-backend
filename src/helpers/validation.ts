@@ -1,4 +1,21 @@
+/**
+ * validation.ts — Zod schemas + a helper that THROWS instead of returning
+ * success/failure objects.
+ *
+ * WHY THROW?  Because validation failure is an exceptional control-flow event.
+ * With asyncHandler wrapping every route, a thrown ValidationError is caught
+ * automatically and forwarded to the global error handler — no manual `if
+ * (!parsed.success)` blocks needed in every controller.
+ *
+ * TWO HELPERS:
+ *
+ *   parseBody(schema, data)  — throws ValidationError on failure
+ *   safeParseBody(schema, data) — returns { success, data } | { success, error }
+ *                                 for cases where you want to handle errors manually
+ */
+
 import { z } from 'zod';
+import { ValidationError } from '../errors/AppError.js';
 
 // ─── Reusable field schemas ───────────────────────────────────────────────────
 
@@ -20,9 +37,7 @@ const nameSchema = z
   .trim();
 
 const messageTextSchema = z.string().max(4000, 'Message is too long').default('');
-
 const emojiSchema = z.string({ required_error: 'Emoji is required' }).min(1).max(8);
-
 const uuidSchema = z.string().min(1, 'ID is required');
 
 // ─── Auth schemas ─────────────────────────────────────────────────────────────
@@ -44,9 +59,7 @@ export const refreshTokenSchema = z.object({
 
 // ─── Conversation schemas ─────────────────────────────────────────────────────
 
-export const createConversationSchema = z.object({
-  userId: uuidSchema,
-});
+export const createConversationSchema = z.object({ userId: uuidSchema });
 
 export const createGroupSchema = z.object({
   name: z
@@ -83,13 +96,8 @@ export const editMessageSchema = z.object({
     .trim(),
 });
 
-export const addReactionSchema = z.object({
-  emoji: emojiSchema,
-});
-
-export const forwardMessageSchema = z.object({
-  toConversationId: uuidSchema,
-});
+export const addReactionSchema = z.object({ emoji: emojiSchema });
+export const forwardMessageSchema = z.object({ toConversationId: uuidSchema });
 
 // ─── Profile schemas ──────────────────────────────────────────────────────────
 
@@ -121,14 +129,52 @@ export const paginationQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(30),
 });
 
-// ─── Utility ──────────────────────────────────────────────────────────────────
+// ─── Utilities ────────────────────────────────────────────────────────────────
 
+/**
+ * parseBody — Parse and validate `data` against `schema`.
+ * THROWS a ValidationError (→ caught by asyncHandler → global error handler)
+ * with human-readable field-level details on failure.
+ *
+ * Prefer this in controllers so there is NO error-branch boilerplate.
+ */
+export function parseBody<T>(schema: z.ZodSchema<T>, data: unknown): T {
+  const result = schema.safeParse(data);
+
+  if (result.success) return result.data;
+
+  const details = result.error.errors.map((e) => ({
+    field: e.path.join('.') || 'root',
+    message: e.message,
+    code: e.code,
+  }));
+
+  // The first error message is used as the top-level message for brevity
+  const message = result.error.errors[0]?.message ?? 'Validation failed';
+
+  throw new ValidationError(message, details);
+}
+
+/**
+ * safeParseBody — Non-throwing variant for the rare cases where validation
+ * failure needs custom handling (e.g., branching on optional fields).
+ */
 export function safeParseBody<T>(
   schema: z.ZodSchema<T>,
   data: unknown,
-): { success: true; data: T } | { success: false; error: string } {
+): { success: true; data: T } | { success: false; error: string; details: unknown[] } {
   const result = schema.safeParse(data);
   if (result.success) return { success: true, data: result.data };
-  const messages = result.error.errors.map((e) => e.message).join(', ');
-  return { success: false, error: messages };
+
+  const details = result.error.errors.map((e) => ({
+    field: e.path.join('.') || 'root',
+    message: e.message,
+    code: e.code,
+  }));
+
+  return {
+    success: false,
+    error: result.error.errors[0]?.message ?? 'Validation failed',
+    details,
+  };
 }
