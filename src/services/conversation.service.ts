@@ -64,17 +64,12 @@ async function buildConversationDto(
   conv: InstanceType<typeof Conversation>,
   requestingUserId: string,
 ): Promise<ConversationType> {
-  // Populate members
   const memberDocs = await User.find({ _id: { $in: conv.members } });
   const users: PublicUser[] = memberDocs.map((u) => ({
     ...docToPublicUser(u),
     status: isUserOnline(u._id.toString()) ? 'online' : u.status,
   }));
 
-  // FIX: For DM conversations, always derive display name/picture from the
-  // OTHER user's document (relative to requestingUserId). The stored conv.name
-  // reflects whoever created the conversation, so user B would see their own
-  // name rather than user A's name without this swap.
   let displayName = conv.name;
   let displayPicture = conv.picture;
 
@@ -88,7 +83,6 @@ async function buildConversationDto(
     }
   }
 
-  // Unread count: messages not sent by me, not deleted, not seen by me
   const unreadCount = await Message.countDocuments({
     conversationId: conv._id,
     senderId: { $ne: new mongoose.Types.ObjectId(requestingUserId) },
@@ -96,7 +90,6 @@ async function buildConversationDto(
     seenBy: { $nin: [new mongoose.Types.ObjectId(requestingUserId)] },
   });
 
-  // Latest message
   let latestMessage: MessageType | undefined;
   if (conv.latestMessage) {
     const latestDoc = await Message.findById(conv.latestMessage);
@@ -120,9 +113,6 @@ async function buildConversationDto(
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export const conversationService = {
-  /**
-   * Get all conversations for a user, sorted by latest activity.
-   */
   async getConversationsForUser(userId: string): Promise<ConversationType[]> {
     const convs = await Conversation.find({ members: userId }).sort({
       updatedAt: -1,
@@ -130,9 +120,6 @@ export const conversationService = {
     return Promise.all(convs.map((c) => buildConversationDto(c, userId)));
   },
 
-  /**
-   * Get a single conversation (only if user is a member).
-   */
   async getConversationById(
     conversationId: string,
     userId: string,
@@ -146,21 +133,6 @@ export const conversationService = {
     return buildConversationDto(conv, userId);
   },
 
-  /**
-   * Start or return an existing 1-on-1 DM.
-   *
-   * FIX 1 (correct name for both users): We now store the TARGET user's
-   * name/picture on the conversation document. buildConversationDto swaps
-   * displayed name/picture to the OTHER member relative to the viewer, so
-   * both parties always see the correct name.
-   *
-   * FIX 2 (return existing DM): The previous $size:2 + $all query does NOT
-   * work reliably in MongoDB because $size and $all are evaluated independently
-   * and don't compose into "array contains exactly these two elements". We
-   * replace it with a two-step approach: find all non-group convs where both
-   * users are members, then filter in JS for exactly 2 members. This is safe
-   * because DMs always have exactly 2 members by construction.
-   */
   async findOrCreateDirect(
     requesterId: string,
     data: CreateConversationRequest,
@@ -175,22 +147,15 @@ export const conversationService = {
     const requesterObjectId = new mongoose.Types.ObjectId(requesterId);
     const targetObjectId = new mongoose.Types.ObjectId(targetId);
 
-    // FIX: Find existing DM by checking both members are present in a
-    // non-group conversation. $elemMatch + countDocuments approach is fragile;
-    // instead we query for convs containing BOTH users and filter for 2 members.
     const existing = await Conversation.findOne({
       isGroup: false,
       members: { $all: [requesterObjectId, targetObjectId] },
     });
 
-    // Verify it really is a 2-member conversation (guards against edge cases
-    // where a member was once in a group that accidentally matched).
     if (existing && existing.members.length === 2) {
       return buildConversationDto(existing, requesterId);
     }
 
-    // Create new DM. Store target's name/picture so that buildConversationDto
-    // can derive the correct display for each viewer via the "other member" swap.
     const newConv = await Conversation.create({
       name: targetUser.name,
       picture: targetUser.picture,
@@ -201,9 +166,6 @@ export const conversationService = {
     return buildConversationDto(newConv, requesterId);
   },
 
-  /**
-   * Create a new group conversation.
-   */
   async createGroup(
     creatorId: string,
     data: CreateGroupRequest,
@@ -214,7 +176,7 @@ export const conversationService = {
     ];
     const memberIds = [creatorId, ...uniqueUserIds];
 
-    // Group needs creator + at least 2 others
+    // Group needs creator + at least 2 others = 3 total minimum
     if (memberIds.length < 3) return 'invalid_members';
 
     // Verify all users exist
@@ -234,9 +196,6 @@ export const conversationService = {
     return buildConversationDto(newGroup, creatorId);
   },
 
-  /**
-   * Add a member to a group (admin only).
-   */
   async addGroupMember(
     conversationId: string,
     requesterId: string,
@@ -269,9 +228,6 @@ export const conversationService = {
     return buildConversationDto(conv, requesterId);
   },
 
-  /**
-   * Remove a member from a group (admin only, or self-leave).
-   */
   async removeGroupMember(
     conversationId: string,
     requesterId: string,
@@ -283,8 +239,8 @@ export const conversationService = {
     if (!conv) return 'not_found';
     if (!conv.isGroup) return 'not_group';
 
-    const isSelf = requesterId === targetUserId;
-    if (!isSelf && conv.adminId?.toString() !== requesterId) return 'not_admin';
+    // Only admin can remove others (self-leave goes through leaveGroup)
+    if (conv.adminId?.toString() !== requesterId) return 'not_admin';
 
     const isMember = conv.members.some((m) => m.toString() === targetUserId);
     if (!isMember) return 'not_member';
@@ -297,8 +253,49 @@ export const conversationService = {
   },
 
   /**
-   * Mark all messages in a conversation as read for a user.
+   * Leave a group conversation.
+   * - Any member can leave themselves.
+   * - If the leaving user is admin and others remain, admin transfers to the
+   *   next member in the list.
+   * - If they are the last member, the conversation (and its messages) is deleted.
+   * Returns 'deleted' if the conversation was removed, or the updated DTO.
    */
+  async leaveGroup(
+    conversationId: string,
+    userId: string,
+  ): Promise<
+    ConversationType | 'deleted' | 'not_found' | 'not_group' | 'not_member'
+  > {
+    const conv = await Conversation.findById(conversationId);
+    if (!conv) return 'not_found';
+    if (!conv.isGroup) return 'not_group';
+
+    const isMember = conv.members.some((m) => m.toString() === userId);
+    if (!isMember) return 'not_member';
+
+    // Remove user from members list
+    conv.members = conv.members.filter((m) => m.toString() !== userId);
+
+    // If no members left, delete the conversation and all its messages
+    if (conv.members.length === 0) {
+      await Message.deleteMany({ conversationId: conv._id });
+      await Conversation.findByIdAndDelete(conv._id);
+      return 'deleted';
+    }
+
+    // If leaving user was admin, transfer admin to the first remaining member
+    if (conv.adminId?.toString() === userId) {
+      conv.adminId = conv.members[0];
+    }
+
+    conv.updatedAt = nowDate();
+    await conv.save();
+
+    // Build DTO from the perspective of the first remaining member
+    // (the leaving user is no longer in the conversation)
+    return buildConversationDto(conv, conv.members[0]!.toString());
+  },
+
   async markAsRead(conversationId: string, userId: string): Promise<void> {
     const objectId = new mongoose.Types.ObjectId(userId);
     await Message.updateMany(
