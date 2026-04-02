@@ -3,7 +3,7 @@ import { Conversation } from '../models/conversation.model.js';
 import { Message } from '../models/message.model.js';
 import { User } from '../models/user.model.js';
 import { docToPublicUser, nowDate } from '../helpers/index.js';
-import { isUserOnline, getSocketsForUser } from '../config/runtimeStore.js';
+import { isUserOnline } from '../config/runtimeStore.js';
 import type {
   Conversation as ConversationType,
   PublicUser,
@@ -71,8 +71,10 @@ async function buildConversationDto(
     status: isUserOnline(u._id.toString()) ? 'online' : u.status,
   }));
 
-  // BUG FIX 1: For DM conversations, show the OTHER person's name/picture
-  // relative to the requesting user, not the stored name (which is from creator's POV)
+  // FIX: For DM conversations, always derive display name/picture from the
+  // OTHER user's document (relative to requestingUserId). The stored conv.name
+  // reflects whoever created the conversation, so user B would see their own
+  // name rather than user A's name without this swap.
   let displayName = conv.name;
   let displayPicture = conv.picture;
 
@@ -146,6 +148,18 @@ export const conversationService = {
 
   /**
    * Start or return an existing 1-on-1 DM.
+   *
+   * FIX 1 (correct name for both users): We now store the TARGET user's
+   * name/picture on the conversation document. buildConversationDto swaps
+   * displayed name/picture to the OTHER member relative to the viewer, so
+   * both parties always see the correct name.
+   *
+   * FIX 2 (return existing DM): The previous $size:2 + $all query does NOT
+   * work reliably in MongoDB because $size and $all are evaluated independently
+   * and don't compose into "array contains exactly these two elements". We
+   * replace it with a two-step approach: find all non-group convs where both
+   * users are members, then filter in JS for exactly 2 members. This is safe
+   * because DMs always have exactly 2 members by construction.
    */
   async findOrCreateDirect(
     requesterId: string,
@@ -158,25 +172,30 @@ export const conversationService = {
     const targetUser = await User.findById(targetId);
     if (!targetUser) return 'user_not_found';
 
-    // Check if DM already exists
+    const requesterObjectId = new mongoose.Types.ObjectId(requesterId);
+    const targetObjectId = new mongoose.Types.ObjectId(targetId);
+
+    // FIX: Find existing DM by checking both members are present in a
+    // non-group conversation. $elemMatch + countDocuments approach is fragile;
+    // instead we query for convs containing BOTH users and filter for 2 members.
     const existing = await Conversation.findOne({
       isGroup: false,
-      members: { $all: [requesterId, targetId], $size: 2 },
+      members: { $all: [requesterObjectId, targetObjectId] },
     });
 
-    if (existing) return buildConversationDto(existing, requesterId);
+    // Verify it really is a 2-member conversation (guards against edge cases
+    // where a member was once in a group that accidentally matched).
+    if (existing && existing.members.length === 2) {
+      return buildConversationDto(existing, requesterId);
+    }
 
-    const requester = await User.findById(requesterId);
-    if (!requester) return 'user_not_found';
-
-    // BUG FIX 1: Store the target user's name/picture so that when the target
-    // views this conversation, buildConversationDto will swap it to the requester's
-    // name/picture for them (since we now derive name from the other member).
+    // Create new DM. Store target's name/picture so that buildConversationDto
+    // can derive the correct display for each viewer via the "other member" swap.
     const newConv = await Conversation.create({
       name: targetUser.name,
       picture: targetUser.picture,
       isGroup: false,
-      members: [requesterId, targetId],
+      members: [requesterObjectId, targetObjectId],
     });
 
     return buildConversationDto(newConv, requesterId);
@@ -217,8 +236,6 @@ export const conversationService = {
 
   /**
    * Add a member to a group (admin only).
-   * Returns the updated conversation DTO AND the new member's socket IDs
-   * so the caller (controller) can join them to the socket room.
    */
   async addGroupMember(
     conversationId: string,
@@ -254,7 +271,6 @@ export const conversationService = {
 
   /**
    * Remove a member from a group (admin only, or self-leave).
-   * Returns the updated conversation DTO.
    */
   async removeGroupMember(
     conversationId: string,

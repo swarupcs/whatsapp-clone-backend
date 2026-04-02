@@ -29,7 +29,17 @@ function toDto(doc: InstanceType<typeof Message>): MessageType {
     conversationId: toStr(o['conversationId']),
     senderId: toStr(o['senderId']),
     message: String(o['message'] ?? ''),
-    files: (o['files'] as { attachmentId: string; name: string; type: string; url: string; size: number }[] | undefined)?.map((f) => ({
+    files: (
+      o['files'] as
+        | {
+            attachmentId: string;
+            name: string;
+            type: string;
+            url: string;
+            size: number;
+          }[]
+        | undefined
+    )?.map((f) => ({
       id: f.attachmentId,
       name: f.name,
       type: f.type,
@@ -46,9 +56,15 @@ function toDto(doc: InstanceType<typeof Message>): MessageType {
     }),
     replyTo: o['replyTo']
       ? {
-          messageId: toStr((o['replyTo'] as Record<string, unknown>)['messageId']),
-          senderId: toStr((o['replyTo'] as Record<string, unknown>)['senderId']),
-          senderName: String((o['replyTo'] as Record<string, unknown>)['senderName']),
+          messageId: toStr(
+            (o['replyTo'] as Record<string, unknown>)['messageId'],
+          ),
+          senderId: toStr(
+            (o['replyTo'] as Record<string, unknown>)['senderId'],
+          ),
+          senderName: String(
+            (o['replyTo'] as Record<string, unknown>)['senderName'],
+          ),
           message: String((o['replyTo'] as Record<string, unknown>)['message']),
         }
       : undefined,
@@ -69,7 +85,7 @@ function toDto(doc: InstanceType<typeof Message>): MessageType {
 
 export const messageService = {
   /**
-   * Paginated messages for a conversation (cursor = page number, newest page first).
+   * Paginated messages for a conversation (cursor = page number).
    * Messages within a page are returned in chronological order.
    */
   async getMessages(
@@ -82,7 +98,6 @@ export const messageService = {
 
     const total = await Message.countDocuments({ conversationId });
 
-    // Newest-first pagination: skip from the end
     const skip = Math.max(0, total - safePage * safeLimit);
     const take = Math.min(safeLimit, total - (safePage - 1) * safeLimit);
 
@@ -104,9 +119,13 @@ export const messageService = {
   },
 
   /**
-   * Search messages in a conversation by text.
+   * Search messages in a single conversation by text (case-insensitive).
+   * Excludes deleted messages.
    */
-  async searchMessages(conversationId: string, query: string): Promise<MessageType[]> {
+  async searchMessages(
+    conversationId: string,
+    query: string,
+  ): Promise<MessageType[]> {
     const docs = await Message.find({
       conversationId,
       isDeleted: false,
@@ -119,12 +138,23 @@ export const messageService = {
   },
 
   /**
-   * Search messages across all conversations the user is a member of.
+   * Search messages across all conversations the requesting user is a member of.
+   *
+   * FIX: The search is correctly scoped to only the user's conversations so
+   * they cannot see messages from conversations they are not part of. We first
+   * retrieve conversation IDs via a lean query (faster than full population),
+   * then run a single $in query against Message.
    */
   async globalSearch(userId: string, query: string): Promise<MessageType[]> {
-    // Find all conversation IDs the user belongs to
-    const convs = await Conversation.find({ members: userId }, '_id');
+    // Lean query — we only need the _id field from each conversation doc.
+    const convs = await Conversation.find(
+      { members: new mongoose.Types.ObjectId(userId) },
+      '_id',
+    ).lean();
+
     const convIds = convs.map((c) => c._id);
+
+    if (convIds.length === 0) return [];
 
     const docs = await Message.find({
       conversationId: { $in: convIds },
@@ -138,7 +168,7 @@ export const messageService = {
   },
 
   /**
-   * Send a new message.
+   * Send a new message (text, files, or both).
    */
   async sendMessage(
     conversationId: string,
@@ -183,7 +213,6 @@ export const messageService = {
       updatedAt: now,
     });
 
-    // Update conversation's latest message timestamp
     await Conversation.findByIdAndUpdate(conversationId, {
       latestMessage: newDoc._id,
       updatedAt: now,
@@ -213,7 +242,6 @@ export const messageService = {
     msg.updatedAt = now;
     await msg.save();
 
-    // Refresh latestMessage if this was the latest
     await refreshLatestMessage(conversationId);
 
     return toDto(msg);
@@ -262,10 +290,8 @@ export const messageService = {
     );
 
     if (existingIdx !== -1) {
-      // Remove reaction
       msg.reactions.splice(existingIdx, 1);
     } else {
-      // Add reaction
       msg.reactions.push({ emoji, userId: userObjectId, createdAt: nowDate() });
     }
 
@@ -276,13 +302,22 @@ export const messageService = {
   },
 
   /**
-   * Pin a message.
+   * Pin a message in a conversation.
+   *
+   * FIX: The service correctly handles both DMs and group chats — there is no
+   * group-only restriction on pinning. Any conversation member with access
+   * (verified by requireConversationMember middleware) can pin. The controller
+   * now emits MESSAGE_PINNED via socket so all room members update in real time.
    */
   async pinMessage(
     conversationId: string,
     messageId: string,
     pinnedBy: string,
   ): Promise<MessageType | 'not_found' | 'deleted'> {
+    // Verify the conversation exists and the message belongs to it
+    const conv = await Conversation.findById(conversationId);
+    if (!conv) return 'not_found';
+
     const msg = await Message.findOne({ _id: messageId, conversationId });
     if (!msg) return 'not_found';
     if (msg.isDeleted) return 'deleted';
@@ -299,6 +334,9 @@ export const messageService = {
 
   /**
    * Unpin a message.
+   *
+   * FIX: Same as pin — works for both DMs and group chats. The controller
+   * emits MESSAGE_UNPINNED via socket so all room members update in real time.
    */
   async unpinMessage(
     conversationId: string,
@@ -318,7 +356,7 @@ export const messageService = {
   },
 
   /**
-   * Get all pinned messages in a conversation.
+   * Get all pinned (non-deleted) messages in a conversation, newest pin first.
    */
   async getPinnedMessages(conversationId: string): Promise<MessageType[]> {
     const docs = await Message.find({
@@ -396,7 +434,10 @@ export const messageService = {
 
     if (!msg) {
       // May already be seen — return the message anyway
-      const existing = await Message.findOne({ _id: messageId, conversationId });
+      const existing = await Message.findOne({
+        _id: messageId,
+        conversationId,
+      });
       return existing ? toDto(existing) : null;
     }
 
