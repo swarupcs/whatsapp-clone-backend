@@ -301,7 +301,7 @@ async function handleInitiateCall(
   callerId: string,
   data: SocketCallPayload,
 ): Promise<void> {
-  const { conversationId, callType } = data;
+  const { conversationId, callType, signal } = data;
   if (!conversationId) return;
 
   const caller = await userService.getUserById(callerId);
@@ -312,9 +312,9 @@ async function handleInitiateCall(
     caller,
     conversationId,
     callType,
+    signal,
   });
 }
-
 function handleCallAccepted(
   io: SocketIOServer,
   acceptorId: string,
