@@ -50,10 +50,11 @@ export function createApp(): express.Application {
   // ── Request logger ────────────────────────────────────────────────────────
   app.use(requestLogger);
 
-  // ── Body parsers ──────────────────────────────────────────────────────────
+  // ── Body parsers ────────────────────────────────────────────────────────────
   // These throw SyntaxError on malformed JSON — caught by globalErrorHandler
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+  app.use(cookieParser());
 
   // ── Content-Type guard (after body parsers, before routes) ────────────────
   app.use('/api', requireJsonBody);
@@ -110,4 +111,6 @@ export function createApp(): express.Application {
   app.use(globalErrorHandler);
 
   return app;
+}
+n app;
 }

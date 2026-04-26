@@ -18,6 +18,7 @@ import {
   UnauthorizedError,
   ConflictError,
   NotFoundError,
+  BadRequestError,
 } from '../errors/AppError.js';
 import { sendOk, sendCreated } from '../utils/response.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
@@ -25,8 +26,14 @@ import {
   parseBody,
   loginSchema,
   registerSchema,
-  refreshTokenSchema,
 } from '../helpers/validation.js';
+
+const COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: 'strict' as const,
+  maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+};
 
 export const authController = {
   /** POST /api/auth/login */
@@ -36,7 +43,10 @@ export const authController = {
     const result = await authService.login(data);
     if (!result) throw new UnauthorizedError('Invalid email or password');
 
-    sendOk(res, result, 'Login successful');
+    const { tokens, user } = result;
+    res.cookie('refreshToken', tokens.refreshToken, COOKIE_OPTIONS);
+
+    sendOk(res, { user, tokens: { accessToken: tokens.accessToken } }, 'Login successful');
   }),
 
   /** POST /api/auth/register */
@@ -48,23 +58,32 @@ export const authController = {
       throw new ConflictError('An account with this email already exists');
     }
 
-    sendCreated(res, result, 'Account created successfully');
+    const { tokens, user } = result as Exclude<typeof result, 'email_taken'>;
+    res.cookie('refreshToken', tokens.refreshToken, COOKIE_OPTIONS);
+
+    sendCreated(res, { user, tokens: { accessToken: tokens.accessToken } }, 'Account created successfully');
   }),
 
   /** POST /api/auth/refresh */
   refresh: asyncHandler(async (req: Request, res: Response) => {
-    const { refreshToken } = parseBody(refreshTokenSchema, req.body);
+    const refreshToken = req.cookies?.refreshToken;
+    if (!refreshToken) throw new BadRequestError('Refresh token missing from cookies');
 
     const tokens = await authService.refreshTokens(refreshToken);
-    if (!tokens) throw new UnauthorizedError('Invalid or expired refresh token');
+    if (!tokens) {
+      res.clearCookie('refreshToken');
+      throw new UnauthorizedError('Invalid or expired refresh token');
+    }
 
-    sendOk(res, tokens, 'Tokens refreshed');
+    res.cookie('refreshToken', tokens.refreshToken, COOKIE_OPTIONS);
+    sendOk(res, { accessToken: tokens.accessToken }, 'Tokens refreshed');
   }),
 
   /** POST /api/auth/logout */
   logout: asyncHandler(async (req: Request, res: Response) => {
-    const { refreshToken } = req.body as { refreshToken?: string };
+    const refreshToken = req.cookies?.refreshToken;
     await authService.logout(req.userId!, refreshToken);
+    res.clearCookie('refreshToken');
     sendOk(res, null, 'Logged out successfully');
   }),
 
