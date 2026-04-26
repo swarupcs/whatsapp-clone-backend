@@ -19,6 +19,7 @@ import helmet from 'helmet';
 import path from 'path';
 import rateLimit from 'express-rate-limit';
 import { env } from './config/env.js';
+import cookieParser from 'cookie-parser';
 import apiRouter from './routes/index.js';
 import {
   requestLogger,
@@ -111,6 +112,4 @@ export function createApp(): express.Application {
   app.use(globalErrorHandler);
 
   return app;
-}
-n app;
 }
