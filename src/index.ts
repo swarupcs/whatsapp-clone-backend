@@ -24,11 +24,16 @@ import { connectDB, disconnectDB } from './config/database.js';
 import { env } from './config/env.js';
 import { logger } from './utils/logger.js';
 
+import { initCleanupJob } from './services/cleanup.service.js';
+
 async function bootstrap(): Promise<void> {
   // 1. Connect to MongoDB
   await connectDB();
 
-  // 2. Create Express app
+  // 2. Initialize background jobs
+  initCleanupJob();
+
+  // 3. Create Express app
   const app = createApp();
 
   // 3. Wrap in HTTP server
