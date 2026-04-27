@@ -8,6 +8,8 @@ export const runtimeStore = {
   socketUserMap: new Map<string, string>(),
   /** userId → Set of socketIds (a user can have multiple tabs open) */
   onlineSockets: new Map<string, Set<string>>(),
+  /** userId → { otherUserId, conversationId } */
+  activeCalls: new Map<string, { otherUserId: string; conversationId: string }>(),
 };
 
 export function addSocket(socketId: string, userId: string): void {
@@ -44,4 +46,21 @@ export function isUserOnline(userId: string): boolean {
 
 export function getOnlineUserIds(): string[] {
   return Array.from(runtimeStore.onlineSockets.keys());
+}
+
+export function setCallSession(userId: string, otherUserId: string, conversationId: string): void {
+  runtimeStore.activeCalls.set(userId, { otherUserId, conversationId });
+  runtimeStore.activeCalls.set(otherUserId, { otherUserId: userId, conversationId });
+}
+
+export function getCallSession(userId: string) {
+  return runtimeStore.activeCalls.get(userId);
+}
+
+export function clearCallSession(userId: string): void {
+  const session = runtimeStore.activeCalls.get(userId);
+  if (session) {
+    runtimeStore.activeCalls.delete(userId);
+    runtimeStore.activeCalls.delete(session.otherUserId);
+  }
 }

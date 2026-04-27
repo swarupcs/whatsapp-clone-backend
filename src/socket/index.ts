@@ -7,6 +7,9 @@ import {
   getSocketsForUser,
   isUserOnline,
   getOnlineUserIds,
+  setCallSession,
+  getCallSession,
+  clearCallSession,
 } from '../config/runtimeStore.js';
 import { verifyAccessToken } from '../helpers/index.js';
 import { userService } from '../services/user.service.js';
@@ -171,6 +174,19 @@ export function initSocket(httpServer: HttpServer): SocketIOServer {
 
     socket.on('disconnect', () => {
       console.log(`[Socket] Disconnected: ${userId} (${socket.id})`);
+
+      // Handle zombie calls: if user was in a call/ringing state, end it for the other party
+      const callSession = getCallSession(userId);
+      if (callSession) {
+        getSocketsForUser(callSession.otherUserId).forEach((socketId) => {
+          io.to(socketId).emit(SOCKET_EVENTS.CALL_ENDED, {
+            enderId: userId,
+            conversationId: callSession.conversationId,
+          });
+        });
+        clearCallSession(userId);
+      }
+
       const uid = removeSocket(socket.id);
       if (uid) {
         handleUserOffline(io, uid).catch((err) => {
@@ -304,8 +320,17 @@ async function handleInitiateCall(
   const { conversationId, callType, signal } = data;
   if (!conversationId) return;
 
+  const conv = await Conversation.findById(conversationId);
+  if (!conv) return;
+
   const caller = await userService.getUserById(callerId);
   if (!caller) return;
+
+  // Track the call session (assume 1:1 for WebRTC logic)
+  const otherUserId = conv.members.find((m) => m.toString() !== callerId);
+  if (otherUserId) {
+    setCallSession(callerId, otherUserId.toString(), conversationId);
+  }
 
   socket.to(conversationId).emit(SOCKET_EVENTS.INCOMING_CALL, {
     callerId,
@@ -334,6 +359,7 @@ function handleCallRejected(
   rejectorId: string,
   data: { callerId: string; conversationId: string },
 ): void {
+  clearCallSession(rejectorId);
   getSocketsForUser(data.callerId).forEach((socketId) => {
     io.to(socketId).emit(SOCKET_EVENTS.CALL_REJECTED, {
       rejectorId,
@@ -347,6 +373,7 @@ function handleCallEnded(
   enderId: string,
   data: { conversationId: string; otherUserId: string },
 ): void {
+  clearCallSession(enderId);
   getSocketsForUser(data.otherUserId).forEach((socketId) => {
     io.to(socketId).emit(SOCKET_EVENTS.CALL_ENDED, {
       enderId,
