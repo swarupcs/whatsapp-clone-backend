@@ -15,6 +15,11 @@ router.get(
   requireConversationMember,
   conversationController.getOne,
 );
+router.patch(
+  '/:conversationId',
+  requireConversationMember,
+  conversationController.updateGroup,
+);
 router.post(
   '/:conversationId/read',
   requireConversationMember,

@@ -74,6 +74,16 @@ export const createGroupSchema = z.object({
   picture: z.string().url('Invalid picture URL').optional(),
 });
 
+export const updateGroupSchema = z.object({
+  name: z
+    .string()
+    .min(1, 'Group name cannot be empty')
+    .max(80, 'Group name is too long')
+    .trim()
+    .optional(),
+  picture: z.string().url('Invalid picture URL').optional(),
+});
+
 // ─── Message schemas ──────────────────────────────────────────────────────────
 
 export const sendMessageSchema = z.object({

@@ -16,6 +16,7 @@ import {
   parseBody,
   createConversationSchema,
   createGroupSchema,
+  updateGroupSchema,
 } from '../helpers/validation.js';
 import { getSocketsForUser } from '../config/runtimeStore.js';
 
@@ -89,6 +90,34 @@ export const conversationController = {
         getSocketsForUser(member.id).forEach((sid) =>
           io.sockets.sockets.get(sid)?.join(result.id),
         );
+      });
+    }
+  }),
+
+  /** PATCH /api/conversations/:conversationId */
+  updateGroup: asyncHandler(async (req: Request, res: Response) => {
+    const data = parseBody(updateGroupSchema, req.body);
+
+    const result = await conversationService.updateGroup(
+      req.params['conversationId']!,
+      req.userId!,
+      data,
+    );
+
+    if (result === 'not_found') throw new NotFoundError('Conversation');
+    if (result === 'not_group')
+      throw new BadRequestError('This is not a group conversation');
+    if (result === 'not_admin')
+      throw new ForbiddenError('Only the admin can update group details');
+
+    sendOk(res, result, 'Group details updated');
+
+    const io = req.app.locals['io'] as SocketIOServer | undefined;
+    if (io) {
+      // Notify all members of the group update
+      io.to(req.params['conversationId']!).emit('group_updated', {
+        conversationId: req.params['conversationId']!,
+        conversation: result,
       });
     }
   }),

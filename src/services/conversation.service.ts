@@ -196,6 +196,25 @@ export const conversationService = {
     return buildConversationDto(newGroup, creatorId);
   },
 
+  async updateGroup(
+    conversationId: string,
+    requesterId: string,
+    data: { name?: string; picture?: string },
+  ): Promise<ConversationType | 'not_found' | 'not_group' | 'not_admin'> {
+    const conv = await Conversation.findById(conversationId);
+    if (!conv) return 'not_found';
+    if (!conv.isGroup) return 'not_group';
+    if (conv.adminId?.toString() !== requesterId) return 'not_admin';
+
+    if (data.name) conv.name = data.name.trim();
+    if (data.picture) conv.picture = data.picture;
+
+    conv.updatedAt = nowDate();
+    await conv.save();
+
+    return buildConversationDto(conv, requesterId);
+  },
+
   async addGroupMember(
     conversationId: string,
     requesterId: string,
