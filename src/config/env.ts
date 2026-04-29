@@ -46,7 +46,7 @@ export const env = {
   mongodb: {
     uri: isProd
       ? requireEnv('MONGODB_URI')
-      : optionalEnv('MONGODB_URI', 'mongodb://localhost:27017/whatsapp_clone'),
+      : optionalEnv('MONGODB_URI', 'MONGODB_URI'),
   },
 
   jwt: {
@@ -63,6 +63,18 @@ export const env = {
   upload: {
     maxFileSizeMb: parseInt(optionalEnv('MAX_FILE_SIZE_MB', '50'), 10),
     uploadDir: optionalEnv('UPLOAD_DIR', 'uploads'),
+  },
+
+  imagekit: {
+    publicKey: isProd
+      ? requireEnv('IMAGEKIT_PUBLIC_KEY')
+      : optionalEnv('IMAGEKIT_PUBLIC_KEY', ''),
+    privateKey: isProd
+      ? requireEnv('IMAGEKIT_PRIVATE_KEY')
+      : optionalEnv('IMAGEKIT_PRIVATE_KEY', ''),
+    urlEndpoint: isProd
+      ? requireEnv('IMAGEKIT_URL_ENDPOINT')
+      : optionalEnv('IMAGEKIT_URL_ENDPOINT', ''),
   },
 
   rateLimit: {

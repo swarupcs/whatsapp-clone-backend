@@ -112,9 +112,9 @@ export const messageController = {
       }
     }
 
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
-    const fileAttachments = uploadedFiles.map((f) =>
-      multerFileToAttachment(f, baseUrl),
+    // Upload each file to ImageKit (async — returns CDN URLs)
+    const fileAttachments = await Promise.all(
+      uploadedFiles.map((f) => multerFileToAttachment(f)),
     );
 
     const result = await messageService.sendMessage(
@@ -141,6 +141,7 @@ export const messageController = {
 
     sendCreated(res, result, 'Message sent');
   }),
+
 
   /** PATCH /api/conversations/:conversationId/messages/:messageId */
   edit: asyncHandler(async (req: Request, res: Response) => {

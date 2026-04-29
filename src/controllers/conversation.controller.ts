@@ -19,6 +19,8 @@ import {
   updateGroupSchema,
 } from '../helpers/validation.js';
 import { getSocketsForUser } from '../config/runtimeStore.js';
+import { uploadAvatar } from '../helpers/upload.js';
+
 
 export const conversationController = {
   /** GET /api/conversations */
@@ -253,5 +255,48 @@ export const conversationController = {
       req.userId!,
     );
     sendOk(res, null, 'Marked as read');
+  }),
+
+  /**
+   * POST /api/conversations/:conversationId/picture
+   *
+   * Upload a group avatar image to ImageKit CDN and update the conversation.
+   * Expects multipart/form-data with a single image field named "picture".
+   */
+  uploadGroupPicture: asyncHandler(async (req: Request, res: Response) => {
+    const conversationId = req.params['conversationId']!;
+    const file = req.file as Express.Multer.File | undefined;
+
+    if (!file) throw new BadRequestError('No image file provided');
+    if (!file.mimetype.startsWith('image/')) {
+      throw new BadRequestError('Only image files are accepted for group pictures');
+    }
+
+    // Upload to ImageKit and get back the CDN URL
+    const cdnUrl = await uploadAvatar(file.buffer, file.mimetype, file.originalname);
+
+    // Persist the new picture URL on the conversation doc
+    const result = await conversationService.updateGroup(
+      conversationId,
+      req.userId!,
+      { picture: cdnUrl },
+    );
+
+    if (result === 'not_found') throw new NotFoundError('Conversation');
+    if (result === 'not_group')
+      throw new BadRequestError('This is not a group conversation');
+    if (result === 'not_admin')
+      throw new ForbiddenError('Only the admin can update group details');
+
+    sendOk(res, result, 'Group picture updated');
+
+    // Notify all room members of the change
+    const io = req.app.locals['io'] as SocketIOServer | undefined;
+    if (io) {
+      io.to(conversationId).emit('group_updated', {
+        conversationId,
+        conversation: result,
+      });
+    }
   }),
 };

@@ -7,16 +7,15 @@
  *   3. Request logger
  *   4. Body parsers
  *   5. Rate limiters
- *   6. Static files
- *   7. API routes
- *   8. 404 handler          ← catches unmatched routes
- *   9. Global error handler ← MUST be last, MUST have 4 params (err, req, res, next)
+ *   6. API routes           ← media files are served from ImageKit CDN (no /uploads static route)
+ *   7. 404 handler          ← catches unmatched routes
+ *   8. Global error handler ← MUST be last, MUST have 4 params (err, req, res, next)
  */
 
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import path from 'path';
+
 import rateLimit from 'express-rate-limit';
 import { env } from './config/env.js';
 import cookieParser from 'cookie-parser';
@@ -92,12 +91,6 @@ export function createApp(): express.Application {
     },
   });
   app.use('/api/auth', authLimiter);
-
-  // ── Static file serving ───────────────────────────────────────────────────
-  app.use(
-    '/uploads',
-    express.static(path.resolve(process.cwd(), env.upload.uploadDir), { maxAge: '7d' }),
-  );
 
   // ── API routes ────────────────────────────────────────────────────────────
   app.use('/api', apiRouter);

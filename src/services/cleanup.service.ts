@@ -5,6 +5,7 @@ import path from 'path';
 import { Message } from '../models/message.model.js';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
+import { deleteFromImageKit } from './imagekit.service.js';
 
 /**
  * Periodically deletes physical files for messages that have been marked 
@@ -32,22 +33,26 @@ export function initCleanupJob() {
       }
 
       let deletedCount = 0;
-      const uploadDir = path.resolve(process.cwd(), env.upload.uploadDir);
 
       for (const msg of messagesWithOrphanedFiles) {
         if (!msg.files || msg.files.length === 0) continue;
 
         for (const file of msg.files) {
           try {
-            // Extract filename from URL (e.g., http://localhost:5000/uploads/filename.png)
-            // The filename is the last segment of the path
-            const urlPath = new URL(file.url, 'http://localhost').pathname;
-            const filename = path.basename(urlPath);
-            const filePath = path.join(uploadDir, filename);
-
-            if (existsSync(filePath)) {
-              await fs.unlink(filePath);
+            if (file.id && !file.url.includes('/uploads/')) {
+              await deleteFromImageKit(file.id);
               deletedCount++;
+            } else if (file.url.includes('/uploads/')) {
+              // Fallback for legacy local files
+              const uploadDir = path.resolve(process.cwd(), env.upload.uploadDir);
+              const urlPath = new URL(file.url, 'http://localhost').pathname;
+              const filename = path.basename(urlPath);
+              const filePath = path.join(uploadDir, filename);
+
+              if (existsSync(filePath)) {
+                await fs.unlink(filePath);
+                deletedCount++;
+              }
             }
           } catch (err) {
             logger.error(`[Cleanup] Failed to delete file for message ${msg._id}:`, {

@@ -1,9 +1,23 @@
+/**
+ * upload.ts — Multer + ImageKit integration.
+ *
+ * Files are buffered in memory by multer (no disk writes) and then pushed
+ * directly to ImageKit via the @imagekit/nodejs SDK.
+ *
+ * Usage in a route handler:
+ *   router.post('/', upload.array('files', 10), messageController.send);
+ *
+ * After the route handler runs, req.files contains Express.Multer.File[]
+ * objects where file.buffer holds the raw bytes. Call `multerFileToAttachment`
+ * (which internally calls ImageKit) to get back a FileAttachment DTO with an
+ * ImageKit CDN URL.
+ */
+
 import multer, { type FileFilterCallback } from 'multer';
-import path from 'path';
-import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import type { Request } from 'express';
 import { env } from '../config/env.js';
+import { uploadToImageKit } from '../services/imagekit.service.js';
 
 // ─── Allowed MIME types ───────────────────────────────────────────────────────
 
@@ -25,26 +39,13 @@ const ALLOWED_MIME_TYPES = new Set([
   'application/x-7z-compressed',
 ]);
 
-// ─── Ensure upload directory exists ──────────────────────────────────────────
-
-const UPLOAD_DIR = path.resolve(process.cwd(), env.upload.uploadDir);
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-}
-
-// ─── Storage engine ───────────────────────────────────────────────────────────
-
-const storage = multer.diskStorage({
-  destination(_req, _file, cb) { cb(null, UPLOAD_DIR); },
-  filename(_req, file, cb) {
-    const ext = path.extname(file.originalname).toLowerCase();
-    cb(null, `${uuidv4()}${ext}`);
-  },
-});
-
 // ─── File filter ──────────────────────────────────────────────────────────────
 
-function fileFilter(_req: Request, file: Express.Multer.File, cb: FileFilterCallback): void {
+function fileFilter(
+  _req: Request,
+  file: Express.Multer.File,
+  cb: FileFilterCallback,
+): void {
   if (ALLOWED_MIME_TYPES.has(file.mimetype)) {
     cb(null, true);
   } else {
@@ -52,35 +53,67 @@ function fileFilter(_req: Request, file: Express.Multer.File, cb: FileFilterCall
   }
 }
 
-// ─── Multer instance ──────────────────────────────────────────────────────────
+// ─── Multer instance (memory storage — no disk I/O) ──────────────────────────
 
 export const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   fileFilter,
-  limits: { fileSize: env.upload.maxFileSizeMb * 1024 * 1024, files: 10 },
+  limits: {
+    fileSize: env.upload.maxFileSizeMb * 1024 * 1024,
+    files: 10,
+  },
 });
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-export function buildFileUrl(filename: string, baseUrl: string): string {
-  return `${baseUrl}/uploads/${filename}`;
+/**
+ * Determines the ImageKit folder based on MIME type.
+ */
+function folderForMime(mimeType: string): string {
+  if (mimeType.startsWith('image/')) return '/swiftchat/images';
+  if (mimeType.startsWith('video/')) return '/swiftchat/videos';
+  if (mimeType.startsWith('audio/')) return '/swiftchat/audio';
+  return '/swiftchat/documents';
 }
 
-export function deleteUploadedFile(filename: string): void {
-  const filePath = path.join(UPLOAD_DIR, filename);
-  fs.unlink(filePath, (err) => {
-    if (err && err.code !== 'ENOENT') {
-      console.error(`[Upload] Failed to delete file ${filename}:`, err.message);
-    }
-  });
-}
+/**
+ * Converts a multer in-memory file to a FileAttachment DTO by uploading it
+ * to ImageKit. Returns the ImageKit CDN URL (not a localhost path).
+ *
+ * NOTE: This is async because it performs an HTTP upload to ImageKit.
+ */
+export async function multerFileToAttachment(file: Express.Multer.File) {
+  const folder = folderForMime(file.mimetype);
+  const uploaded = await uploadToImageKit(
+    file.buffer,
+    file.mimetype,
+    file.originalname,
+    folder,
+  );
 
-export function multerFileToAttachment(file: Express.Multer.File, baseUrl: string) {
   return {
-    id: uuidv4(),
+    id: uploaded.fileId || uuidv4(),
     name: file.originalname,
     type: file.mimetype,
-    url: buildFileUrl(file.filename, baseUrl),
+    url: uploaded.url,
     size: file.size,
   };
+}
+
+/**
+ * Upload a single avatar/picture buffer to the ImageKit avatars folder.
+ * Returns the public CDN URL.
+ */
+export async function uploadAvatar(
+  buffer: Buffer,
+  mimeType: string,
+  originalName: string,
+): Promise<string> {
+  const result = await uploadToImageKit(
+    buffer,
+    mimeType,
+    originalName,
+    '/swiftchat/avatars',
+  );
+  return result.url;
 }
