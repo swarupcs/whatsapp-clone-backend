@@ -395,12 +395,28 @@ function handleCallSignal(
   });
 }
 
-export function emitNewMessage(
+export async function emitNewMessage(
   io: SocketIOServer,
   conversationId: string,
-  message: unknown,
-  conversation: unknown,
-): void {
+  message: any,
+  conversation: any,
+): Promise<void> {
+  // Ensure all online members of the conversation are in the socket room.
+  // This handles the "first message" scenario where recipients haven't joined the room yet.
+  if (conversation && Array.isArray(conversation.users)) {
+    conversation.users.forEach((u: any) => {
+      const targetId = u.id || u._id?.toString();
+      if (targetId) {
+        getSocketsForUser(targetId).forEach((socketId) => {
+          const socket = io.sockets.sockets.get(socketId);
+          if (socket) {
+            socket.join(conversationId);
+          }
+        });
+      }
+    });
+  }
+
   io.to(conversationId).emit(SOCKET_EVENTS.NEW_MESSAGE, {
     message,
     conversation,
