@@ -140,8 +140,12 @@ const messageSchema = new Schema<IMessageDocument>(
                 : String(r['userId']),
           }));
         }
-        return ret;
-      },
+        if (Array.isArray(ret['files'])) {
+          ret['files'] = ret['files'].map((f: any) => {
+            const { attachmentId, ...rest } = f;
+            return { id: attachmentId, ...rest };
+          }) as any;
+        }        return ret;      },
     },
     toObject: { virtuals: true },
   },

@@ -39,11 +39,10 @@ export function initCleanupJob() {
 
         for (const file of msg.files) {
           try {
-            if (file.id && !file.url.includes('/uploads/')) {
-              await deleteFromImageKit(file.id);
+            if (file.attachmentId && !file.url.includes('/uploads/')) {
+              await deleteFromImageKit(file.attachmentId);
               deletedCount++;
-            } else if (file.url.includes('/uploads/')) {
-              // Fallback for legacy local files
+            } else if (file.url.includes('/uploads/')) {              // Fallback for legacy local files
               const uploadDir = path.resolve(process.cwd(), env.upload.uploadDir);
               const urlPath = new URL(file.url, 'http://localhost').pathname;
               const filename = path.basename(urlPath);
