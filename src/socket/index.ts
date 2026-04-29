@@ -401,8 +401,6 @@ export async function emitNewMessage(
   message: any,
   conversation: any,
 ): Promise<void> {
-  // Ensure all online members of the conversation are in the socket room.
-  // This handles the "first message" scenario where recipients haven't joined the room yet.
   if (conversation && Array.isArray(conversation.users)) {
     conversation.users.forEach((u: any) => {
       const targetId = u.id || u._id?.toString();
@@ -410,13 +408,23 @@ export async function emitNewMessage(
         getSocketsForUser(targetId).forEach((socketId) => {
           const socket = io.sockets.sockets.get(socketId);
           if (socket) {
+            // Join the room for future messages
             socket.join(conversationId);
+            
+            // For the VERY first message, sometimes room join + emit-to-room 
+            // has a race condition. So we ALSO emit to the socket directly.
+            // The frontend dedupes by message ID anyway.
+            io.to(socketId).emit(SOCKET_EVENTS.NEW_MESSAGE, {
+              message,
+              conversation,
+            });
           }
         });
       }
     });
   }
 
+  // Still emit to the room for anyone already in it (or if join worked immediately)
   io.to(conversationId).emit(SOCKET_EVENTS.NEW_MESSAGE, {
     message,
     conversation,
