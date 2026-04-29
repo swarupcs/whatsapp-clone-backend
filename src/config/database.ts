@@ -6,6 +6,7 @@ export async function connectDB(): Promise<void> {
     mongoose.set('strictQuery', false);
 
     await mongoose.connect(env.mongodb.uri, {
+      dbName: env.mongodb.dbName || undefined,
       serverSelectionTimeoutMS: 5000,
       socketTimeoutMS: 45000,
     });

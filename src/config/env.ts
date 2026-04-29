@@ -46,7 +46,8 @@ export const env = {
   mongodb: {
     uri: isProd
       ? requireEnv('MONGODB_URI')
-      : optionalEnv('MONGODB_URI', 'MONGODB_URI'),
+      : optionalEnv('MONGODB_URI', 'mongodb://localhost:27017'),
+    dbName: optionalEnv('MONGODB_DB_NAME', 'whatsapp'),
   },
 
   jwt: {
